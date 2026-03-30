@@ -1,0 +1,320 @@
+---
+title: "Breast Cancer Diversity Analysis"
+author: "Monica Kim"
+date: "2026-03-22"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(stringr)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(rstatix)
+library(readr)
+library(survival)
+library(survminer)
+library(readr)
+```
+
+```{r}
+# define receptors
+receptors <- c("IGH", "IGK", "IGL", "TRA", "TRA+TRB", "TRB", "TRD", "TRG", "TRG+TRD", "TRs+IGs")
+
+# clean patient IDs
+clean_id <- function(x) {
+  str_remove(x, ".Aligned.sortedByCoord.out.bam")
+}
+
+# load all Div+Clin files into one dataframe
+div_all <- map_df(receptors, function(rec) {
+  file <- paste0(rec, "_CDR3_Div+Clin_2026-03-22.csv")
+  df <- read.csv(file)
+  df$patient <- clean_id(df$patient)
+  df$receptor <- rec
+  return(df)
+})
+
+# load all PerPatient stats
+stats_all <- map_df(receptors, function(rec) {
+  file <- paste0(rec, "_PerPatientCountStats_2026-03-22.csv")
+  df <- read.csv(file)
+  df$patient <- clean_id(df$patient)
+  df$receptor <- rec
+  return(df)
+})
+
+# load all CountsPerCDR3_withCharacteristics files
+counts_all <- map_df(receptors, function(rec) {
+  file <- paste0(rec, "_CountsPerCDR3_withCharacteristics_2026-03-22.csv")
+  df <- read.csv(file)
+  df$patient <- clean_id(df$patient)
+  df$receptor <- rec
+  return(df)
+})
+
+patient_summary <- div_all %>%
+  left_join(stats_all, by = c("patient", "receptor"))
+```
+
+```{r}
+# NON PARAMETRIC ANOVA & PAIRWISE TEST IF STATISTICALLY SIGNIFICANT
+
+diversity_metrics <- c(
+  "lowQ",
+  "highQ",
+  "deltaqD",
+  "IPq",
+  "IPslope",
+  "qDatIPq",
+  "Shan",
+  "Simp"
+)
+
+# initialize empty dataframes to store combined results
+all_results <- tibble()
+
+# run Kruskal-Wallis + Mann-Whitney and return results as dataframe
+kruskal_mann_df <- function(df, metric, group_var, receptor) {
+  if (!(group_var %in% names(df)) | !(metric %in% names(df))) return(NULL)
+  
+  df_clean <- df %>% filter(!is.na(.data[[group_var]]), !is.na(.data[[metric]]))
+  
+  if(n_distinct(df_clean[[group_var]]) < 2) return(NULL)
+  
+  kw_res <- kruskal_test(df_clean, formula = as.formula(paste(metric, "~", group_var))) %>%
+    mutate(receptor = receptor,
+           clinical_var = group_var,
+           metric = metric,
+           test = "Kruskal-Wallis",
+           group1 = NA,
+           group2 = NA,
+           p.adj = NA,
+           significance = ifelse(p < 0.05, "*", "ns")) %>%
+    select(receptor, metric, clinical_var, test, group1, group2, statistic, p, p.adj, significance)
+  
+  pw_res <- tibble()
+  
+  if(kw_res$p < 0.05) {
+    pw_res <- df_clean %>%
+      wilcox_test(as.formula(paste(metric, "~", group_var)), p.adjust.method = "BH") %>%
+      add_significance("p") %>%
+      mutate(
+        receptor = receptor,
+        clinical_var = group_var,
+        metric = metric,
+        test = "Pairwise",
+        significance = p.signif
+      ) %>%
+      select(receptor, metric, clinical_var, test, group1, group2, statistic, p, p.adj, significance)
+  }
+  
+  bind_rows(kw_res, pw_res)
+}
+
+# hardcoded clinical characteristics I wish to categorize by
+clinical_vars <- c(
+  "TNM",
+  "Stage",
+  "subtype"
+)
+
+# loop through receptors and clinical variables
+for (rec in receptors) {
+  
+  df_rec <- div_all %>% filter(receptor == rec)
+  
+  for (clin_var in clinical_vars) {
+    
+    for (metric in diversity_metrics) {
+      
+      res <- kruskal_mann_df(df_rec, metric, clin_var, rec)
+      
+      if (!is.null(res)) {
+        res <- res %>% mutate(metric = metric)
+        all_results <- bind_rows(all_results, res)
+      }
+    }
+  }
+}
+
+# save combined CSVs
+write_csv(all_results, "Kruskal_Pairwise_All.csv")
+```
+
+```{r}
+# SURVIVAL ANALYSIS
+
+# output directory
+output_dir <- "survival_results"
+if(!dir.exists(output_dir)) dir.create(output_dir)
+
+# FUNCTION
+
+logrank_p_per_receptor <- function(df, receptor_name, time_var, event_var, cut_method = "median") {
+  
+  metric <- "IPq"
+  
+  df_rec <- df %>%
+    filter(receptor == receptor_name) %>%
+    filter(!is.na(IPq),
+           !is.na(.data[[event_var]]),
+           !is.na(.data[[time_var]]))
+  
+  # too few samples
+  if(nrow(df_rec) < 10) {
+    return(tibble(
+      receptor = receptor_name,
+      metric = metric,
+      endpoint = event_var,
+      cut_method = cut_method,
+      logrank_p = NA,
+      n_used = nrow(df_rec),
+      n_events = NA,
+      group_sizes = NA,
+      reason = "too_few_samples"
+    ))
+  }
+  
+  # CUT METHODS (median and 25/75)
+  
+  if(cut_method == "median") {
+    
+    cut_val <- median(df_rec$IPq, na.rm = TRUE)
+    
+    df_rec <- df_rec %>%
+      mutate(Diversity_group = ifelse(IPq <= cut_val, "Low", "High"))
+    
+  } else if(cut_method == "quartile_extremes") {
+    
+    q1 <- quantile(df_rec$IPq, 0.25, na.rm = TRUE)
+    q3 <- quantile(df_rec$IPq, 0.75, na.rm = TRUE)
+    
+    df_rec <- df_rec %>%
+      mutate(Diversity_group = case_when(
+        IPq <= q1 ~ "Low",
+        IPq >= q3 ~ "High",
+        TRUE ~ NA_character_
+      )) %>%
+      filter(!is.na(Diversity_group))
+  }
+  
+  group_sizes <- df_rec %>%
+    count(Diversity_group) %>%
+    summarise(label = paste(n, collapse = " vs ")) %>%
+    pull(label)
+  
+  # need 2 groups
+  if(n_distinct(df_rec$Diversity_group) < 2) {
+    return(tibble(
+      receptor = receptor_name,
+      metric = metric,
+      endpoint = event_var,
+      cut_method = cut_method,
+      logrank_p = NA,
+      n_used = nrow(df_rec),
+      n_events = NA,
+      group_sizes = group_sizes,
+      reason = "only_one_group"
+    ))
+  }
+  
+  # count total events
+  n_events <- sum(df_rec[[event_var]] == 1)
+  
+  # check event distribution per group
+  event_by_group <- df_rec %>%
+    group_by(Diversity_group) %>%
+    summarise(events = sum(.data[[event_var]] == 1), .groups = "drop")
+  
+  if (any(event_by_group$events == 0)) {
+    return(tibble(
+      receptor = receptor_name,
+      metric = metric,
+      endpoint = event_var,
+      cut_method = cut_method,
+      logrank_p = NA,
+      n_used = nrow(df_rec),
+      n_events = n_events,
+      group_sizes = group_sizes,
+      reason = "no_events_in_group"
+    ))
+  }
+  
+  # SURVIVAL TEST
+  
+  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ Diversity_group"))
+  
+  logrank <- tryCatch(
+    survdiff(surv_formula, data = df_rec),
+    error = function(e) return(NULL)
+  )
+  
+  if (is.null(logrank) || is.na(logrank$chisq)) {
+    return(tibble(
+      receptor = receptor_name,
+      metric = metric,
+      endpoint = event_var,
+      cut_method = cut_method,
+      logrank_p = NA,
+      n_used = nrow(df_rec),
+      n_events = n_events,
+      group_sizes = group_sizes,
+      reason = "survdiff_failed"
+    ))
+  }
+  
+  df_chi <- length(logrank$n) - 1
+  
+  if (df_chi <= 0 || logrank$chisq < 0) {
+    return(tibble(
+      receptor = receptor_name,
+      metric = metric,
+      endpoint = event_var,
+      cut_method = cut_method,
+      logrank_p = NA,
+      n_used = nrow(df_rec),
+      n_events = n_events,
+      group_sizes = group_sizes,
+      reason = "invalid_chisq"
+    ))
+  }
+  
+  p_value <- pchisq(logrank$chisq, df = df_chi, lower.tail = FALSE)
+  
+  # SUCCESS
+  
+  tibble(
+    receptor = receptor_name,
+    metric = metric,
+    endpoint = event_var,
+    cut_method = cut_method,
+    logrank_p = p_value,
+    n_used = nrow(df_rec),
+    n_events = n_events,
+    group_sizes = group_sizes,
+    reason = "ok"
+  )
+}
+
+# RUN ANALYSIS
+
+surv_pvals <- expand_grid(
+  receptor = receptors,
+  endpoint = c("OS", "PFI"),
+  cut_method = c("median", "quartile_extremes")
+) %>%
+  mutate(
+    time_var = ifelse(endpoint == "OS", "OStime", "PFItime"),
+    event_var = endpoint
+  ) %>%
+  pmap_dfr(~logrank_p_per_receptor(div_all, ..1, ..4, ..5, ..3))
+
+# save CSVs
+
+write_csv(
+  surv_pvals,
+  file.path(output_dir, "Survival_Logrank_IPq_with_reasons.csv")
+)
+```

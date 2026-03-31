@@ -1,0 +1,89 @@
+---
+title: "Abundance Analysis"
+author: "Monica Kim"
+date: "2026-03-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+```{r}
+# receptors
+receptors <- c("IGK", "IGL", "IGH", "TRA", "TRB", "TRD", "TRG")
+
+# read and combine
+data_list <- lapply(receptors, function(r) {
+  df <- read.csv(paste0(r, "_PerPatientCountStats_2026-03-22.csv"))
+  df$receptor <- r
+  return(df)
+})
+
+combined_df <- bind_rows(data_list)
+```
+
+```{r}
+combined_df <- combined_df %>%
+  mutate(patient = gsub("\\.Aligned\\.sortedByCoord\\.out\\.bam", "", patient))
+
+combined_df <- combined_df %>%
+  mutate(clonality = max_count / total_count)
+
+receptor_summary <- combined_df %>%
+  group_by(receptor) %>%
+  summarise(
+    mean_total = mean(total_count, na.rm = TRUE),
+    median_total = median(total_count, na.rm = TRUE),
+    mean_richness = mean(num_unique_CDR3, na.rm = TRUE),
+    mean_clonality = mean(clonality, na.rm = TRUE),
+    n_patients = n()
+  ) %>%
+  arrange(desc(mean_total))
+
+print(receptor_summary)
+```
+
+```{r}
+ggplot(combined_df, aes(x = receptor, y = total_count)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme_minimal() +
+  labs(title = "Receptor Abundance (Total Counts)", y = "Total Counts (log scale)")
+```
+
+```{r}
+combined_df <- combined_df %>%
+  mutate(group = ifelse(grepl("^IG", receptor), "B_cell", "T_cell"))
+
+group_summary <- combined_df %>%
+  group_by(group) %>%
+  summarise(
+    mean_total = mean(total_count, na.rm = TRUE),
+    mean_richness = mean(num_unique_CDR3, na.rm = TRUE),
+    mean_clonality = mean(clonality, na.rm = TRUE)
+  )
+
+group_summary
+```
+
+```{r}
+# immune reads per patient
+patient_totals <- combined_df %>%
+  group_by(patient) %>%
+  summarise(total_immune = sum(total_count, na.rm = TRUE))
+
+# proportions
+combined_df <- combined_df %>%
+  left_join(patient_totals, by = "patient") %>%
+  mutate(proportion = total_count / total_immune)
+```
+
+```{r}
+ggplot(combined_df, aes(x = receptor, y = proportion)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Receptor Proportion per Patient", y = "Proportion of Total Immune Reads")
+```
+

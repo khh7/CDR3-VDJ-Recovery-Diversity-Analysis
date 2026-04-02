@@ -143,178 +143,89 @@ for (rec in receptors) {
 write_csv(all_results, "Kruskal_Pairwise_All.csv")
 ```
 
+
 ```{r}
 # SURVIVAL ANALYSIS
 
-# output directory
-output_dir <- "survival_results"
-if(!dir.exists(output_dir)) dir.create(output_dir)
-
-# FUNCTION
-
-logrank_p_per_receptor <- function(df, receptor_name, time_var, event_var, cut_method = "median") {
-  
-  metric <- "IPq"
-  
-  df_rec <- df %>%
-    filter(receptor == receptor_name) %>%
-    filter(!is.na(IPq),
-           !is.na(.data[[event_var]]),
-           !is.na(.data[[time_var]]))
-  
-  # too few samples
-  if(nrow(df_rec) < 10) {
-    return(tibble(
-      receptor = receptor_name,
-      metric = metric,
-      endpoint = event_var,
-      cut_method = cut_method,
-      logrank_p = NA,
-      n_used = nrow(df_rec),
-      n_events = NA,
-      group_sizes = NA,
-      reason = "too_few_samples"
-    ))
-  }
-  
-  # CUT METHODS (median and 25/75)
-  
-  if(cut_method == "median") {
-    
-    cut_val <- median(df_rec$IPq, na.rm = TRUE)
-    
-    df_rec <- df_rec %>%
-      mutate(Diversity_group = ifelse(IPq <= cut_val, "Low", "High"))
-    
-  } else if(cut_method == "quartile_extremes") {
-    
-    q1 <- quantile(df_rec$IPq, 0.25, na.rm = TRUE)
-    q3 <- quantile(df_rec$IPq, 0.75, na.rm = TRUE)
-    
-    df_rec <- df_rec %>%
-      mutate(Diversity_group = case_when(
-        IPq <= q1 ~ "Low",
-        IPq >= q3 ~ "High",
-        TRUE ~ NA_character_
-      )) %>%
-      filter(!is.na(Diversity_group))
-  }
-  
-  group_sizes <- df_rec %>%
-    count(Diversity_group) %>%
-    summarise(label = paste(n, collapse = " vs ")) %>%
-    pull(label)
-  
-  # need 2 groups
-  if(n_distinct(df_rec$Diversity_group) < 2) {
-    return(tibble(
-      receptor = receptor_name,
-      metric = metric,
-      endpoint = event_var,
-      cut_method = cut_method,
-      logrank_p = NA,
-      n_used = nrow(df_rec),
-      n_events = NA,
-      group_sizes = group_sizes,
-      reason = "only_one_group"
-    ))
-  }
-  
-  # count total events
-  n_events <- sum(df_rec[[event_var]] == 1)
-  
-  # check event distribution per group
-  event_by_group <- df_rec %>%
-    group_by(Diversity_group) %>%
-    summarise(events = sum(.data[[event_var]] == 1), .groups = "drop")
-  
-  if (any(event_by_group$events == 0)) {
-    return(tibble(
-      receptor = receptor_name,
-      metric = metric,
-      endpoint = event_var,
-      cut_method = cut_method,
-      logrank_p = NA,
-      n_used = nrow(df_rec),
-      n_events = n_events,
-      group_sizes = group_sizes,
-      reason = "no_events_in_group"
-    ))
-  }
-  
-  # SURVIVAL TEST
-  
-  surv_formula <- as.formula(paste0("Surv(", time_var, ", ", event_var, ") ~ Diversity_group"))
-  
-  logrank <- tryCatch(
-    survdiff(surv_formula, data = df_rec),
-    error = function(e) return(NULL)
+# ensure numeric
+div_all <- div_all %>%
+  mutate(
+    Shan = as.numeric(Shan),
+    Simp = as.numeric(Simp),
+    IPq  = as.numeric(IPq),
+    OStime = as.numeric(OStime),
+    PFItime = as.numeric(PFItime)
   )
+
+# function to create low/high groups and run survival
+run_survival <- function(df, metric, time_col, event_col, label) {
   
-  if (is.null(logrank) || is.na(logrank$chisq)) {
-    return(tibble(
-      receptor = receptor_name,
-      metric = metric,
-      endpoint = event_var,
-      cut_method = cut_method,
-      logrank_p = NA,
-      n_used = nrow(df_rec),
-      n_events = n_events,
-      group_sizes = group_sizes,
-      reason = "survdiff_failed"
-    ))
-  }
+  # MATCH GRAPH PAD: filter BOTH metric + survival columns first
+  df_clean <- df %>%
+    filter(
+      !is.na(.data[[metric]]),
+      !is.na(.data[[time_col]]),
+      !is.na(.data[[event_col]])
+    )
   
-  df_chi <- length(logrank$n) - 1
+  # compute 25th percentile
+  cutoff <- quantile(df_clean[[metric]], 0.25, na.rm = TRUE, type = 6)
   
-  if (df_chi <= 0 || logrank$chisq < 0) {
-    return(tibble(
-      receptor = receptor_name,
-      metric = metric,
-      endpoint = event_var,
-      cut_method = cut_method,
-      logrank_p = NA,
-      n_used = nrow(df_rec),
-      n_events = n_events,
-      group_sizes = group_sizes,
-      reason = "invalid_chisq"
-    ))
-  }
+  # assign groups
+  df_clean <- df_clean %>%
+    mutate(group = ifelse(.data[[metric]] <= cutoff, "Low", "High"))
   
-  p_value <- pchisq(logrank$chisq, df = df_chi, lower.tail = FALSE)
+  # survival object
+  surv_obj <- Surv(time = df_clean[[time_col]], event = df_clean[[event_col]])
   
-  # SUCCESS
+  # log-rank test
+  surv_diff <- survdiff(surv_obj ~ group, data = df_clean)
+  pval <- 1 - pchisq(surv_diff$chisq, df = 1)
   
-  tibble(
-    receptor = receptor_name,
+  # output
+  data.frame(
+    receptor = unique(df_clean$receptor),
     metric = metric,
-    endpoint = event_var,
-    cut_method = cut_method,
-    logrank_p = p_value,
-    n_used = nrow(df_rec),
-    n_events = n_events,
-    group_sizes = group_sizes,
-    reason = "ok"
+    outcome = label,
+    cutoff_25 = cutoff,
+    n = nrow(df_clean),
+    n_low = sum(df_clean$group == "Low"),
+    n_high = sum(df_clean$group == "High"),
+    chisq = surv_diff$chisq,
+    p_value = pval
   )
 }
 
-# RUN ANALYSIS
+# metrics and outcomes
+metrics <- c("Shan", "Simp", "IPq")
 
-surv_pvals <- expand_grid(
-  receptor = receptors,
-  endpoint = c("OS", "PFI"),
-  cut_method = c("median", "quartile_extremes")
-) %>%
-  mutate(
-    time_var = ifelse(endpoint == "OS", "OStime", "PFItime"),
-    event_var = endpoint
-  ) %>%
-  pmap_dfr(~logrank_p_per_receptor(div_all, ..1, ..4, ..5, ..3))
+# run for all receptors
+results <- map_df(metrics, function(metric) {
+  
+  map_df(unique(div_all$receptor), function(rec) {
+    
+    df_rec <- div_all %>% filter(receptor == rec)
+    
+    # OS
+    res_os <- run_survival(df_rec, metric, "OStime", "OS", "OS")
+    
+    # PFI
+    res_pfi <- run_survival(df_rec, metric, "PFItime", "PFI", "PFI")
+    
+    bind_rows(res_os, res_pfi)
+  })
+})
 
-# save CSVs
+# write results
+write.csv(results, "Survival_Results_25pct_cutoff.csv", row.names = FALSE)
 
-write_csv(
-  surv_pvals,
-  file.path(output_dir, "Survival_Logrank_IPq_with_reasons.csv")
-)
+df_debug <- div_all %>%
+  filter(receptor == "TRB") %>%
+  filter(!is.na(Simp), !is.na(OStime), !is.na(OS))
+
+# quantile(df_debug$Simp, 0.25)
+# nrow(df_debug)
+# summary(df_debug$Simp)
+# quantile(df_debug$Simp, 0.25, type = 6)
+# quantile(df_debug$Simp, c(0.25, 0.5, 0.75), type = 6)
 ```

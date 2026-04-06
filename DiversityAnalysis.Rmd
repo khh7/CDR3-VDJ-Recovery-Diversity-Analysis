@@ -168,12 +168,16 @@ run_survival <- function(df, metric, time_col, event_col, label) {
       !is.na(.data[[event_col]])
     )
   
-  # compute 25th percentile
-  cutoff <- quantile(df_clean[[metric]], 0.25, na.rm = TRUE, type = 6)
+  q25 <- quantile(df_clean[[metric]], 0.25, na.rm = TRUE)
+  q75 <- quantile(df_clean[[metric]], 0.75, na.rm = TRUE)
   
-  # assign groups
   df_clean <- df_clean %>%
-    mutate(group = ifelse(.data[[metric]] <= cutoff, "Low", "High"))
+    mutate(group = case_when(
+      .data[[metric]] <= q25 ~ "Low",
+      .data[[metric]] >= q75 ~ "High",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(!is.na(group))  # exclude middle 50%
   
   # survival object
   surv_obj <- Surv(time = df_clean[[time_col]], event = df_clean[[event_col]])
@@ -187,7 +191,8 @@ run_survival <- function(df, metric, time_col, event_col, label) {
     receptor = unique(df_clean$receptor),
     metric = metric,
     outcome = label,
-    cutoff_25 = cutoff,
+    cutoff_25 = q25,
+    cutoff_75 = q75,
     n = nrow(df_clean),
     n_low = sum(df_clean$group == "Low"),
     n_high = sum(df_clean$group == "High"),
@@ -222,10 +227,4 @@ write.csv(results, "Survival_Results_25pct_cutoff.csv", row.names = FALSE)
 df_debug <- div_all %>%
   filter(receptor == "TRB") %>%
   filter(!is.na(Simp), !is.na(OStime), !is.na(OS))
-
-# quantile(df_debug$Simp, 0.25)
-# nrow(df_debug)
-# summary(df_debug$Simp)
-# quantile(df_debug$Simp, 0.25, type = 6)
-# quantile(df_debug$Simp, c(0.25, 0.5, 0.75), type = 6)
 ```

@@ -251,7 +251,6 @@ for (rec in receptors) {
 write_csv(all_results, "Kruskal_Pairwise_All.csv")
 ```
 
-
 ```{r}
 # SURVIVAL ANALYSIS
 
@@ -266,9 +265,8 @@ div_all <- div_all %>%
   )
 
 # function to create low/high groups and run survival
-run_survival <- function(df, metric, time_col, event_col, label) {
+run_survival <- function(df, metric, time_col, event_col, label, split_type = "25_75") {
   
-  # MATCH GRAPH PAD: filter BOTH metric + survival columns first
   df_clean <- df %>%
     filter(
       !is.na(.data[[metric]]),
@@ -276,31 +274,40 @@ run_survival <- function(df, metric, time_col, event_col, label) {
       !is.na(.data[[event_col]])
     )
   
-  q25 <- quantile(df_clean[[metric]], 0.25, na.rm = TRUE)
-  q75 <- quantile(df_clean[[metric]], 0.75, na.rm = TRUE)
+  if (split_type == "25_75") {
+    q25 <- quantile(df_clean[[metric]], 0.25, na.rm = TRUE)
+    q75 <- quantile(df_clean[[metric]], 0.75, na.rm = TRUE)
+    
+    df_clean <- df_clean %>%
+      mutate(group = case_when(
+        .data[[metric]] <= q25 ~ "Low",
+        .data[[metric]] >= q75 ~ "High",
+        TRUE ~ NA_character_
+      )) %>%
+      filter(!is.na(group))
+    
+  } else if (split_type == "median") {
+    med <- median(df_clean[[metric]], na.rm = TRUE)
+    
+    df_clean <- df_clean %>%
+      mutate(group = ifelse(
+        .data[[metric]] <= med, "Low", "High"
+      ))
+  }
   
-  df_clean <- df_clean %>%
-    mutate(group = case_when(
-      .data[[metric]] <= q25 ~ "Low",
-      .data[[metric]] >= q75 ~ "High",
-      TRUE ~ NA_character_
-    )) %>%
-    filter(!is.na(group))  # exclude middle 50%
+  surv_obj <- Surv(
+    time = df_clean[[time_col]],
+    event = df_clean[[event_col]]
+  )
   
-  # survival object
-  surv_obj <- Surv(time = df_clean[[time_col]], event = df_clean[[event_col]])
-  
-  # log-rank test
   surv_diff <- survdiff(surv_obj ~ group, data = df_clean)
   pval <- 1 - pchisq(surv_diff$chisq, df = 1)
   
-  # output
   data.frame(
     receptor = unique(df_clean$receptor),
     metric = metric,
     outcome = label,
-    cutoff_25 = q25,
-    cutoff_75 = q75,
+    split_type = split_type,
     n = nrow(df_clean),
     n_low = sum(df_clean$group == "Low"),
     n_high = sum(df_clean$group == "High"),
@@ -319,22 +326,18 @@ results <- map_df(metrics, function(metric) {
     
     df_rec <- div_all %>% filter(receptor == rec)
     
-    # OS
-    res_os <- run_survival(df_rec, metric, "OStime", "OS", "OS")
-    
-    # PFI
-    res_pfi <- run_survival(df_rec, metric, "PFItime", "PFI", "PFI")
-    
-    bind_rows(res_os, res_pfi)
+    bind_rows(
+      run_survival(df_rec, metric, "OStime", "OS", "OS", split_type = "25_75"),
+      run_survival(df_rec, metric, "OStime", "OS", "OS", split_type = "median"),
+      
+      run_survival(df_rec, metric, "PFItime", "PFI", "PFI", split_type = "25_75"),
+      run_survival(df_rec, metric, "PFItime", "PFI", "PFI", split_type = "median")
+    )
   })
 })
 
 # write results
-write.csv(results, "Survival_Results_25pct_cutoff.csv", row.names = FALSE)
-
-df_debug <- div_all %>%
-  filter(receptor == "TRB") %>%
-  filter(!is.na(Simp), !is.na(OStime), !is.na(OS))
+write.csv(results, "Survival_Results.csv", row.names = FALSE)
 ```
 
 ```{r}
@@ -457,4 +460,3 @@ ggsave(
   dpi = 300
 )
 ```
-

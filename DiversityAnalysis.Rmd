@@ -19,6 +19,112 @@ library(readr)
 ```
 
 ```{r}
+# receptors
+receptors <- c(
+  "IGH",
+  "IGK",
+  "IGL",
+  "TRA",
+  "TRA+TRB",
+  "TRB",
+  "TRD",
+  "TRG",
+  "TRG+TRD",
+  "TRs+IGs"
+)
+
+#-----------------------------
+# LOAD FILES
+#-----------------------------
+
+sra <- read_csv("SraRunTable.csv")
+clinical <- read_csv("clinical.csv")
+
+#-----------------------------
+# CLEAN SAMPLE NAME
+#-----------------------------
+# Example:
+# S219000833FR.Aligned.sortedByCoord.out.addGroup.bam
+# ->
+# S219000833FR
+
+sra <- sra %>%
+  mutate(
+    patient_clean = str_remove(`Sample Name`, "\\..*$")
+  )
+
+#-----------------------------
+# CREATE SRR -> PATIENT MAP
+#-----------------------------
+
+run_map <- sra %>%
+  select(
+    Run,
+    patient_clean
+  ) %>%
+  rename(patient_clinical = patient_clean)
+
+#-----------------------------
+# PROCESS EACH RECEPTOR FILE
+#-----------------------------
+
+for (rec in receptors) {
+
+  # input file
+  infile <- paste0(rec, "_CDR3_Div-Only_2026-05-17.csv")
+
+  # output file
+  outfile <- paste0(rec, "_CDR3_Div+Clin_2026-05-17.csv")
+
+  # load diversity file
+  div <- read_csv(infile)
+
+  # clean SRR patient column
+  # Example:
+  # SRR31139166.Aligned.sortedByCoord.out.bam
+  # ->
+  # SRR31139166
+
+  div <- div %>%
+    mutate(
+      Run = str_remove(patient, "\\..*$")
+    )
+
+  # attach clinical patient ID using Run
+  div2 <- div %>%
+    left_join(run_map, by = "Run")
+
+  # attach clinical metadata
+  div3 <- div2 %>%
+    left_join(
+      clinical,
+      by = c("patient_clinical" = "patient")
+    )
+
+  # optional cleanup
+  div3 <- div3 %>%
+    select(
+      patient,
+      lowQ,
+      highQ,
+      deltaqD,
+      IPq,
+      IPslope,
+      qDatIPq,
+      Shan,
+      Simp,
+      everything(),
+      -Run
+    )
+
+  # save
+  write_csv(div3, outfile)
+
+  cat("Wrote:", outfile, "\n")
+}
+```
+
+```{r}
 # define receptors
 receptors <- c("IGH", "IGK", "IGL", "TRA", "TRA+TRB", "TRB", "TRD", "TRG", "TRG+TRD", "TRs+IGs")
 
@@ -27,9 +133,11 @@ clean_id <- function(x) {
   str_remove(x, ".Aligned.sortedByCoord.out.bam")
 }
 
+# TODO: Replace the hard-coded output date with YOUR actual data run date when loading CSV files
+
 # load all Div+Clin files into one dataframe
 div_all <- map_df(receptors, function(rec) {
-  file <- paste0(rec, "_CDR3_Div+Clin_2026-03-22.csv")
+  file <- paste0(rec, "_CDR3_Div+Clin_2026-05-17.csv")
   df <- read.csv(file)
   df$patient <- clean_id(df$patient)
   df$receptor <- rec
@@ -38,7 +146,7 @@ div_all <- map_df(receptors, function(rec) {
 
 # load all PerPatient stats
 stats_all <- map_df(receptors, function(rec) {
-  file <- paste0(rec, "_PerPatientCountStats_2026-03-22.csv")
+  file <- paste0(rec, "_PerPatientCountStats_2026-05-17.csv")
   df <- read.csv(file)
   df$patient <- clean_id(df$patient)
   df$receptor <- rec
@@ -47,7 +155,7 @@ stats_all <- map_df(receptors, function(rec) {
 
 # load all CountsPerCDR3_withCharacteristics files
 counts_all <- map_df(receptors, function(rec) {
-  file <- paste0(rec, "_CountsPerCDR3_withCharacteristics_2026-03-22.csv")
+  file <- paste0(rec, "_CountsPerCDR3_withCharacteristics_2026-05-17.csv")
   df <- read.csv(file)
   df$patient <- clean_id(df$patient)
   df$receptor <- rec
@@ -113,7 +221,7 @@ kruskal_mann_df <- function(df, metric, group_var, receptor) {
   bind_rows(kw_res, pw_res)
 }
 
-# hardcoded clinical characteristics I wish to categorize by
+# TODO: update the hardcoded clinical characteristics that YOU wish to categorize by
 clinical_vars <- c(
   "TNM",
   "Stage",
@@ -228,3 +336,125 @@ df_debug <- div_all %>%
   filter(receptor == "TRB") %>%
   filter(!is.na(Simp), !is.na(OStime), !is.na(OS))
 ```
+
+```{r}
+# Read data
+df <- read.csv("TRs+IGs_PerPatientCountStats_2026-05-17.csv")
+
+# Clean patient names
+df$patient <- gsub("\\.Aligned\\.sortedByCoord\\.out\\.bam$", "", df$patient)
+
+# Sort from highest to lowest total_count
+df <- df %>%
+  mutate(patient = sub("\\.Aligned.*$", "", patient)) %>%
+  arrange(desc(total_count)) %>%
+  mutate(patient = factor(patient, levels = patient))
+
+p <- ggplot(df, aes(x = patient, y = total_count)) +
+  geom_col(fill = "steelblue") +
+  scale_y_log10() +
+  theme_bw() +
+  labs(
+    x = "Patient",
+    y = "Total recovered sequences (log10 scale)"
+  ) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 6
+    )
+  )
+
+ggsave(
+  "PatientRecoveryLandscape.png",
+  p,
+  width = 20,   # increase as needed
+  height = 6,
+  dpi = 300
+)
+```
+
+```{r}
+receptors <- c("IGH", "IGK", "IGL", "TRA", "TRB", "TRD", "TRG")
+
+# clean patient IDs
+clean_id <- function(x) {
+  str_remove(x, ".Aligned.sortedByCoord.out.bam")
+}
+
+# load all PerPatient stats
+stats_all <- map_df(receptors, function(rec) {
+  file <- paste0(rec, "_PerPatientCountStats_2026-05-17.csv")
+  df <- read.csv(file)
+  df$patient <- clean_id(df$patient)
+  df$receptor <- rec
+  df
+})
+
+stats_prop <- stats_all %>%
+  group_by(patient) %>%
+  mutate(
+    total_receptors = sum(total_count),
+    proportion = total_count / total_receptors
+  ) %>%
+  ungroup()
+
+patient_order <- stats_all %>%
+  group_by(patient) %>%
+  summarize(total_count = sum(total_count)) %>%
+  arrange(desc(total_count)) %>%
+  pull(patient)
+
+stats_prop$patient <- factor(stats_prop$patient, levels = patient_order)
+
+receptor_colors <- c(
+  IGH = "#08306B",  # dark blue
+  IGK = "#2171B5",  # medium blue
+  IGL = "#6BAED6",  # light blue
+
+  TRA = "#00441B",  # dark green
+  TRB = "#238B45",  # medium green
+  TRD = "#66C2A4",  # light green
+  TRG = "#B2E2E2"   # pale green
+)
+
+p_prop <- ggplot(
+  stats_prop,
+  aes(
+    x = patient,
+    y = proportion,
+    fill = receptor
+  )
+) +
+  geom_col(width = 1) +
+  scale_fill_manual(values = receptor_colors) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent
+  ) +
+  labs(
+    x = "Patient",
+    y = "Receptor proportion",
+    fill = "Receptor"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5,
+      size = 6
+    )
+  )
+
+ggsave(
+  "PatientReceptorCompositionLandscape.png",
+  p_prop,
+  width = 20,
+  height = 6,
+  dpi = 300
+)
+```
+

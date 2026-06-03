@@ -11,6 +11,7 @@ The analysis integrates receptor diversity metrics with clinical metadata and pe
 - Receptor composition visualization across patients
 
 CDR3 V(D)J Recovery is a workflow for recovering T-cell and B-cell receptor CDR3 sequences from bulk RNA-seq data using alignment-based analysis methods originally described by Ferrall-Fairbanks et al. (2022).
+^^ reference dr. ff github's docker container (link) - can run locally
 
 The workflow performs end-to-end processing from:
 
